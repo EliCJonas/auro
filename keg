@@ -1,0 +1,143 @@
+#!/bin/bash
+
+VERSION="0.1.0"
+PROGRAM_NAME="keg"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Print colored messages
+print_error() {
+    echo -e "${RED}Error: $1${NC}" >&2
+}
+
+print_success() {
+    echo -e "${GREEN}$1${NC}"
+}
+
+print_info() {
+    echo -e "${BLUE}$1${NC}"
+}
+
+print_warning() {
+    echo -e "${YELLOW}$1${NC}"
+}
+
+# Help command
+cmd_help() {
+    echo "Usage: $PROGRAM_NAME <command> [options] [packages...]"
+    echo ""
+    echo "Commands:"
+    echo "  install <file.keg...>  Install one or more .keg packages"
+    echo "  get <package...>       Download packages without installing"
+    echo "  help                   Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  $PROGRAM_NAME install myapp.keg"
+    echo "  $PROGRAM_NAME get curl wget"
+    echo "  $PROGRAM_NAME help"
+    echo ""
+    echo "Version: $VERSION"
+}
+
+# Install command
+cmd_install() {
+    if [[ $# -eq 0 ]]; then
+        print_error "No .keg file specified"
+        echo "Usage: $PROGRAM_NAME install <file.keg...>"
+        return 1
+    fi
+
+    for kegfile in "$@"; do
+        # Check if file exists
+        if [[ ! -f "$kegfile" ]]; then
+            print_error "File not found: $kegfile"
+            continue
+        fi
+
+        # Check if it's a .keg file
+        if [[ "$kegfile" != *.keg ]]; then
+            print_warning "File does not have .keg extension: $kegfile"
+        fi
+
+        print_info "Installing $kegfile..."
+
+        # Create temp directory for extraction
+        local temp_dir=$(mktemp -d)
+
+        # Unzip the .keg file
+        if ! unzip -q "$kegfile" -d "$temp_dir"; then
+            print_error "Failed to extract $kegfile"
+            rm -rf "$temp_dir"
+            continue
+        fi
+
+        # TODO: Move extracted files to their destinations
+        # Binaries go to: PLACEHOLDER_BIN_DIR
+        # Libraries go to: PLACEHOLDER_LIB_DIR
+        # Config files go to: PLACEHOLDER_CONFIG_DIR
+        # Data files go to: PLACEHOLDER_DATA_DIR
+
+        # Cleanup temp directory
+        rm -rf "$temp_dir"
+
+        print_success "Successfully installed $kegfile"
+    done
+}
+
+# Get command (download only)
+cmd_get() {
+    if [[ $# -eq 0 ]]; then
+        print_error "No packages specified"
+        echo "Usage: $PROGRAM_NAME get <package...>"
+        return 1
+    fi
+
+    print_info "Downloading packages: $*"
+
+    for package in "$@"; do
+        print_info "Downloading $package..."
+        if apt-get download "$package"; then
+            print_success "Successfully downloaded $package"
+        else
+            print_error "Failed to download $package"
+        fi
+    done
+}
+
+# Main command parser
+main() {
+    if [[ $# -eq 0 ]]; then
+        cmd_help
+        exit 0
+    fi
+
+    local command="$1"
+    shift
+
+    case "$command" in
+        install)
+            cmd_install "$@"
+            ;;
+        get)
+            cmd_get "$@"
+            ;;
+        help|--help|-h)
+            cmd_help
+            ;;
+        --version|-v)
+            echo "$PROGRAM_NAME version $VERSION"
+            ;;
+        *)
+            print_error "Unknown command: $command"
+            echo "Run '$PROGRAM_NAME help' for usage information"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
