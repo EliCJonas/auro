@@ -169,12 +169,16 @@ cmd_install() {
             done
         fi
 
-        # Move binary to $BIN (lowercase name)
-        if [[ -f "$pkg_root/$pkg_name" ]]; then
-            cp "$pkg_root/$pkg_name" "$BIN/$bin_name"
-            chmod +x "$BIN/$bin_name"
-            echo "$BIN/$bin_name" >> "$manifest"
-        fi
+        # Move root files (except keg-name.txt) to $BIN
+        for file in "$pkg_root/"*; do
+            local basename=$(basename "$file")
+            # Skip known directories and keg-name.txt
+            [[ -d "$file" ]] && continue
+            [[ "$basename" == "keg-name.txt" ]] && continue
+            cp "$file" "$BIN/$basename"
+            chmod +x "$BIN/$basename"
+            echo "$BIN/$basename" >> "$manifest"
+        done
 
         # Move .desktop files to applications directory
         if [[ -d "$pkg_root/desktop" ]]; then
