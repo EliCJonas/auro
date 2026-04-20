@@ -1,6 +1,8 @@
 # auro
 A small package manager built to make distributing software on Linux easier.
 
+[![2/6 AI-Assisted | Vibescale](https://vibescale.github.io/badge/2.svg)](https://vibescale.github.io/#2)
+
 # .keg format
 The .keg format contains the following:
  - Shared Libraries
