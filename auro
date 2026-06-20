@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="1.4.2"
+VERSION="1.4.5"
 PROGRAM_NAME="auro"
 
 # Check for root/sudo access
@@ -72,6 +72,8 @@ EOF
     echo -e "  ${GREEN}install${NC} <file.keg...>  Install one or more .keg packages"
     echo -e "  ${GREEN}remove${NC} <package...>    Remove installed packages"
     echo -e "  ${GREEN}get${NC} <url...>           Download and install from URL"
+    echo -e "  ${GREEN}load${NC} <file.ikeg...>    Install from an .ikeg descriptor"
+    echo -e "  ${GREEN}repo${NC} <package...>      Install from the remote repository"
     echo -e "  ${GREEN}list${NC}                   List installed packages"
     echo -e "  ${GREEN}help${NC}                   Show this help message"
     echo ""
@@ -279,6 +281,148 @@ cmd_list() {
     done
 }
 
+# Load command (install from .ikeg JSON descriptor)
+cmd_load() {
+    if [[ $# -eq 0 ]]; then
+        print_error "No .ikeg file specified"
+        echo "Usage: $PROGRAM_NAME load <file.ikeg...>"
+        return 1
+    fi
+
+    for ikegfile in "$@"; do
+        # Check if file exists
+        if [[ ! -f "$ikegfile" ]]; then
+            print_error "File not found: $ikegfile"
+            continue
+        fi
+
+        # Check if it's an .ikeg file
+        if [[ "$ikegfile" != *.ikeg ]]; then
+            print_warning "File does not have .ikeg extension: $ikegfile"
+        fi
+
+        print_info "Reading $ikegfile..."
+
+        # Parse JSON and extract fields using a single python3 call
+        # Outputs tab-separated: name\tversion\tauthor\tdescription\tdownload_url
+        local parsed parse_err
+        parsed=$(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    fields = ['name', 'version', 'author', 'description', 'download-url']
+    print('\t'.join(str(d.get(f, '')) for f in fields))
+except Exception as e:
+    print('ERROR:' + str(e), file=sys.stderr)
+    sys.exit(1)
+" "$ikegfile" 2>&1)
+        parse_err=$?
+
+        if [[ $parse_err -ne 0 ]]; then
+            print_error "Failed to parse JSON from $ikegfile"
+            # Show the python error (prefixed with ERROR:)
+            echo "$parsed" | grep '^ERROR:' | sed 's/^ERROR:/  /'
+            continue
+        fi
+
+        # Read tab-separated fields into variables
+        IFS=$'\t' read -r pkg_name pkg_version pkg_author pkg_description pkg_url <<< "$parsed"
+
+        if [[ -z "$pkg_name" ]]; then
+            print_error "Missing 'name' field in $ikegfile"
+            continue
+        fi
+
+        if [[ -z "$pkg_url" ]]; then
+            print_error "Missing 'download-url' field in $ikegfile"
+            continue
+        fi
+
+        # Display package info
+        echo ""
+        echo -e "  ${GREEN}Package:${NC}        $pkg_name"
+        [[ -n "$pkg_version" ]] && echo -e "  ${GREEN}Version:${NC}        $pkg_version"
+        [[ -n "$pkg_author" ]] && echo -e "  ${GREEN}Author:${NC}         $pkg_author"
+        [[ -n "$pkg_description" ]] && echo -e "  ${GREEN}Description:${NC}    $pkg_description"
+        echo -e "  ${GREEN}Download URL:${NC}   $pkg_url"
+        echo ""
+
+        # Confirm installation
+        echo -en "  ${YELLOW}Install $pkg_name? [Y/n]: ${NC}"
+        read -r confirm
+        if [[ "$confirm" =~ ^[Nn]$ ]]; then
+            print_info "Skipping $pkg_name"
+            continue
+        fi
+
+        # Download the .keg file
+        local filename=$(basename "$pkg_url")
+        local keg_path="/tmp/$filename"
+        print_info "Downloading $pkg_url..."
+
+        if ! wget -q "$pkg_url" -O "$keg_path"; then
+            print_error "Failed to download $pkg_url"
+            continue
+        fi
+
+        print_success "Successfully downloaded $filename"
+
+        # Install the downloaded .keg
+        cmd_install "$keg_path"
+
+        # Cleanup temp file
+        rm -f "$keg_path"
+    done
+}
+
+# Repo base URL (no trailing slash)
+REPO_BASE="https://elicjonas.github.io/kegstore/pkgs"
+
+# Repo command (install from remote repository)
+cmd_repo() {
+    if [[ $# -eq 0 ]]; then
+        print_error "No package specified"
+        echo "Usage: $PROGRAM_NAME repo <package...>"
+        return 1
+    fi
+
+    # Fetch the package list index
+    print_info "Fetching package index..."
+    local pkg_index
+    pkg_index=$(wget -qO- "$REPO_BASE/pkgs.list" 2>/dev/null)
+
+    if [[ -z "$pkg_index" ]]; then
+        print_error "Failed to fetch package index from $REPO_BASE"
+        return 1
+    fi
+
+    for pkg_name in "$@"; do
+        # Check if package exists in the index
+        if ! echo "$pkg_index" | grep -qxF "$pkg_name"; then
+            print_error "Package '$pkg_name' not found in repository"
+            continue
+        fi
+
+        # Download the .ikeg descriptor
+        local ikeg_url="$REPO_BASE/$pkg_name.ikeg"
+        local ikeg_file="/tmp/auro-repo-$pkg_name.ikeg"
+
+        print_info "Fetching $pkg_name.ikeg..."
+        if ! wget -q "$ikeg_url" -O "$ikeg_file" 2>/dev/null; then
+            print_error "Failed to download $ikeg_url"
+            rm -f "$ikeg_file"
+            continue
+        fi
+
+        # Delegate to load command
+        cmd_load "$ikeg_file"
+
+        # Cleanup temp ikeg
+        rm -f "$ikeg_file"
+    done
+}
+
 # Get command (download and install)
 cmd_get() {
     if [[ $# -eq 0 ]]; then
@@ -293,10 +437,10 @@ cmd_get() {
         # Get the filename from the URL
         local filename=$(basename "$package")
 
-        if wget -q "$package" -O "$filename"; then
+        if wget -q "$package" -O "/tmp/$filename"; then
             print_success "Successfully downloaded $filename"
             # Automatically install the downloaded .keg file
-            cmd_install "$filename"
+            cmd_install "/tmp/$filename"
         else
             print_error "Failed to download $package"
         fi
@@ -322,6 +466,12 @@ main() {
             ;;
         get)
             cmd_get "$@"
+            ;;
+        load)
+            cmd_load "$@"
+            ;;
+        repo)
+            cmd_repo "$@"
             ;;
         list)
             cmd_list
