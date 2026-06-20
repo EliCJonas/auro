@@ -377,7 +377,7 @@ except Exception as e:
 }
 
 # Repo base URL (no trailing slash)
-REPO_BASE="https://elicjonas.github.io/kegstore/pkgs"
+REPO_BASE="https://elicjonas.github.io/auro-repo/pkgs"
 
 # Repo command (install from remote repository)
 cmd_repo() {
