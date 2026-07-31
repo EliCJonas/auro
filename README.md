@@ -1,8 +1,16 @@
-# auro
+# <p align="center">auro</p>
 
-[![2/6 AI-Assisted | Vibescale](https://vibescale.github.io/badge-bar/2.svg)](https://vibescale.github.io/#2)
+<p align="center">
+  <a href="https://vibescale.github.io/#2">
+    <img src="https://vibescale.github.io/badge-bar/2.svg" alt="2/6 AI-Assisted | Vibescale" />
+  </a>
+</p>
 
-A small package manager built to make distributing software on Linux easier.
+<p align="center">
+  <i>A small package manager built to make distributing software on Linux easier.</i>
+</p>
+
+---
 
 # .keg format
 The .keg format contains the following:
