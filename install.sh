@@ -1,6 +1,6 @@
-#!/bin/zsh
+#!/bin/bash
 
-echo "This script will install the Keg package manager."
+echo "This script will install the Auro package manager."
 
 # Check for root/sudo access
 if [[ $EUID -ne 0 ]]; then
@@ -9,7 +9,7 @@ fi
 
 # Get the real user's home directory (not root's)
 if [[ -n "$SUDO_USER" ]]; then
-    REAL_HOME=$(eval echo ~"$SUDO_USER")
+    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 else
     REAL_HOME="$HOME"
 fi
@@ -20,15 +20,15 @@ mkdir -p "$REAL_HOME/.keg/data"
 mkdir -p "$REAL_HOME/.keg/installed"
 
 # Copy auro script to bin directory
-cp "$(dirname "$0")/keg" "$REAL_HOME/.keg/bin/keg"
+cp "$(dirname "$0")/auro" "$REAL_HOME/.keg/bin/auro"
 
 # Make auro executable
 chmod +x "$REAL_HOME/.keg/bin/auro"
 
 # Add auro to user's PATH if not already present
-if ! grep -q '.keg/bin' "$REAL_HOME/.zshrc" 2>/dev/null; then
-    echo 'export PATH="$HOME/.keg/bin:$PATH"' >> "$REAL_HOME/.zshrc"
+if ! grep -q '.keg/bin' "$REAL_HOME/.bashrc"; then
+    echo 'export PATH="$HOME/.keg/bin:$PATH"' >> "$REAL_HOME/.bashrc"
 fi
 
-echo "Keg has been installed successfully!"
-echo "Run 'source ~/.zshrc' or restart your terminal to use auro."
+echo "Auro has been installed successfully!"
+echo "Run 'source ~/.bashrc' or restart your terminal to use auro."
