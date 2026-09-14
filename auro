@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="1.4.5"
+VERSION="1.5.0"
 PROGRAM_NAME="auro"
 
 # Check for root/sudo access
@@ -28,6 +28,10 @@ LIB="/usr/local/lib/"
 INSTALLED="$REAL_HOME/.keg/installed"
 DESKTOP="$REAL_HOME/.local/share/applications"
 ICONS="$REAL_HOME/.local/share/icons/hicolor/256x256/apps"
+
+# Repository configuration
+CONFIG_FILE="$REAL_HOME/.keg/repositories.conf"
+DEFAULT_REPO_NAME="default"
 
 # Print colored messages
 print_error() {
@@ -74,7 +78,10 @@ EOF
     echo -e "  ${GREEN}get${NC} <url...>           Download and install from URL"
     echo -e "  ${GREEN}load${NC} <file.ikeg...>    Install from an .ikeg descriptor"
     echo -e "  ${GREEN}repo${NC} <package...>      Install from the remote repository"
-    echo -e "  ${GREEN}list${NC}                   List installed packages"
+    echo -e "  ${GREEN}add-repo${NC} <name> <url>      Add a repository"
+    echo -e "  ${GREEN}remove-repo${NC} <name>         Remove a repository"
+    echo -e "  ${GREEN}fixperms${NC}                   Fix permissions on the .keg directory"
+    echo -e "  ${GREEN}list${NC}                       List installed packages"
     echo -e "  ${GREEN}help${NC}                   Show this help message"
     echo ""
     echo -e "${YELLOW}Examples:${NC}"
@@ -349,11 +356,38 @@ except Exception as e:
         echo ""
 
         # Confirm installation
-        echo -en "  ${YELLOW}Install $pkg_name? [Y/n]: ${NC}"
-        read -r confirm
-        if [[ "$confirm" =~ ^[Nn]$ ]]; then
-            print_info "Skipping $pkg_name"
-            continue
+        # Skip prompt if AURO_SKIP_PROMPT is set (e.g. when called from cmd_repo/cmd_get non-interactively)
+        if [[ -z "${AURO_SKIP_PROMPT:-}" ]]; then
+            # Default is NO: an empty/EOF response skips the package instead of
+            # auto-installing it, so a redirected or piped stdin can never push "Y".
+            local skip=0
+            while true; do
+                echo -en "  ${YELLOW}Install $pkg_name? [y/N]: ${NC}"
+                # Read from the controlling terminal so a redirected/piped stdin
+                # cannot auto-advance the prompt.
+                if [[ -r /dev/tty ]]; then
+                    read -r confirm < /dev/tty
+                    confirm_rc=$?
+                else
+                    read -r confirm
+                    confirm_rc=$?
+                fi
+                if [[ $confirm_rc -ne 0 ]]; then
+                    print_warning "No input received; skipping $pkg_name"
+                    skip=1
+                    break
+                fi
+                case "$confirm" in
+                    [Yy]) break ;;
+                    [Nn]|"") print_info "Skipping $pkg_name"; skip=1; break ;;
+                    *) echo -e "  ${RED}Please answer y or n.${NC}" ;;
+                esac
+            done
+            if [[ $skip -eq 1 ]]; then
+                continue
+            fi
+        else
+            print_info "Auto-confirming installation of $pkg_name (AURO_SKIP_PROMPT set)"
         fi
 
         # Download the .keg file
@@ -377,9 +411,125 @@ except Exception as e:
 }
 
 # Repo base URL (no trailing slash)
-REPO_BASE="https://elicjonas.github.io/auro-repo/pkgs"
+REPO_BASE="http://aurorepo.runbsd.io/pkgs"
 
-# Repo command (install from remote repository)
+# Load configured repositories. The built-in default is always first.
+load_repos() {
+    printf '%s\t%s\n' "$DEFAULT_REPO_NAME" "$REPO_BASE"
+
+    if [[ -f "$CONFIG_FILE" ]]; then
+        while IFS=$'\t' read -r repo_name repo_url; do
+            [[ -z "$repo_name" || "$repo_name" == "$DEFAULT_REPO_NAME" ]] && continue
+            repo_url="${repo_url%/}"
+            [[ "$repo_name" =~ ^[a-zA-Z0-9_-]+$ ]] || continue
+            [[ "$repo_url" == http://* || "$repo_url" == https://* ]] || continue
+            printf '%s\t%s\n' "$repo_name" "$repo_url"
+        done < "$CONFIG_FILE"
+    fi
+}
+
+# Add a repository
+cmd_add_repo() {
+    if [[ $# -ne 2 ]]; then
+        print_error "Invalid arguments"
+        echo "Usage: $PROGRAM_NAME add-repo <name> <url>"
+        return 1
+    fi
+
+    local repo_name="$1"
+    local repo_url="$2"
+
+    if [[ ! "$repo_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        print_error "Invalid repository name: $repo_name"
+        return 1
+    fi
+
+    if [[ "$repo_name" == "$DEFAULT_REPO_NAME" ]]; then
+        print_error "Repository name '$DEFAULT_REPO_NAME' is reserved"
+        return 1
+    fi
+
+    repo_url="${repo_url%/}"
+    if [[ "$repo_url" != http://* && "$repo_url" != https://* ]]; then
+        print_error "Repository URL must start with http:// or https://"
+        return 1
+    fi
+
+    if [[ -f "$CONFIG_FILE" ]] && awk -F '\t' -v name="$repo_name" '$1 == name {found=1} END {exit !found}' "$CONFIG_FILE"; then
+        print_error "Repository '$repo_name' already exists"
+        return 1
+    fi
+
+    printf '%s\t%s\n' "$repo_name" "$repo_url" >> "$CONFIG_FILE"
+    print_success "Added repository '$repo_name'"
+}
+
+# Remove a repository
+cmd_remove_repo() {
+    if [[ $# -ne 1 ]]; then
+        print_error "Invalid arguments"
+        echo "Usage: $PROGRAM_NAME remove-repo <name>"
+        return 1
+    fi
+
+    local repo_name="$1"
+
+    if [[ "$repo_name" == "$DEFAULT_REPO_NAME" ]]; then
+        print_error "The default repository cannot be removed"
+        return 1
+    fi
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        print_error "Repository '$repo_name' not found"
+        return 1
+    fi
+
+    if ! awk -F '\t' -v name="$repo_name" '$1 == name {found=1} END {exit !found}' "$CONFIG_FILE"; then
+        print_error "Repository '$repo_name' not found"
+        return 1
+    fi
+
+    local tmp_file
+    tmp_file=$(mktemp "${CONFIG_FILE}.tmp.XXXXXX")
+    awk -F '\t' -v name="$repo_name" '$1 != name' "$CONFIG_FILE" > "$tmp_file"
+    mv "$tmp_file" "$CONFIG_FILE"
+    print_success "Removed repository '$repo_name'"
+}
+
+# Fix permissions on the .keg directory
+cmd_fixperms() {
+    if [[ $# -ne 0 ]]; then
+        print_error "Invalid arguments"
+        echo "Usage: $PROGRAM_NAME fixperms"
+        return 1
+    fi
+
+    if [[ ! -d "$REAL_HOME/.keg" ]]; then
+        print_error "No .keg directory found at $REAL_HOME/.keg"
+        return 1
+    fi
+
+    local target_owner
+    if [[ -n "$SUDO_USER" ]]; then
+        target_owner="$SUDO_USER:$SUDO_USER"
+    else
+        target_owner="$USER:$USER"
+    fi
+
+    chown -R "$target_owner" "$REAL_HOME/.keg" 2>/dev/null || {
+        print_warning "Could not change ownership of $REAL_HOME/.keg to $target_owner"
+    }
+
+    find "$REAL_HOME/.keg" -type d -exec chmod 755 {} + 2>/dev/null || true
+    find "$REAL_HOME/.keg" -type f -exec chmod 644 {} + 2>/dev/null || true
+    if [[ -d "$REAL_HOME/.keg/bin" ]]; then
+        find "$REAL_HOME/.keg/bin" -type f -exec chmod +x {} + 2>/dev/null || true
+    fi
+
+    print_success "Fixed permissions on $REAL_HOME/.keg"
+}
+
+# Repo command (install from configured repositories)
 cmd_repo() {
     if [[ $# -eq 0 ]]; then
         print_error "No package specified"
@@ -387,40 +537,51 @@ cmd_repo() {
         return 1
     fi
 
-    # Fetch the package list index
-    print_info "Fetching package index..."
-    local pkg_index
-    pkg_index=$(wget -qO- "$REPO_BASE/pkgs.list" 2>/dev/null)
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local repos_file="$tmp_dir/repositories.txt"
 
-    if [[ -z "$pkg_index" ]]; then
-        print_error "Failed to fetch package index from $REPO_BASE"
-        return 1
-    fi
+    load_repos > "$repos_file"
+
+    print_info "Fetching package indexes..."
+    while IFS=$'\t' read -r repo_name repo_url; do
+        [[ -z "$repo_name" ]] && continue
+        local index_file="$tmp_dir/$repo_name.list"
+        if ! wget -q "$repo_url/pkgs.list" -O "$index_file" 2>/dev/null; then
+            print_warning "Failed to fetch package index from $repo_name"
+        fi
+    done < "$repos_file"
 
     for pkg_name in "$@"; do
-        # Check if package exists in the index
-        if ! echo "$pkg_index" | grep -qxF "$pkg_name"; then
+        local found=0
+        while IFS=$'\t' read -r repo_name repo_url; do
+            [[ -z "$repo_name" ]] && continue
+            local index_file="$tmp_dir/$repo_name.list"
+            [[ -f "$index_file" ]] || continue
+            if grep -qxF "$pkg_name" "$index_file"; then
+                local ikeg_url="$repo_url/$pkg_name.ikeg"
+                local ikeg_file="/tmp/auro-repo-$pkg_name.ikeg"
+                print_info "Found '$pkg_name' in repository '$repo_name'"
+                print_info "Fetching $pkg_name.ikeg..."
+                if ! wget -q "$ikeg_url" -O "$ikeg_file" 2>/dev/null; then
+                    print_error "Failed to download $ikeg_url"
+                    rm -f "$ikeg_file"
+                    continue
+                fi
+                cmd_load "$ikeg_file"
+                rm -f "$ikeg_file"
+                found=1
+                break
+            fi
+        done < "$repos_file"
+
+        if [[ $found -eq 0 ]]; then
             print_error "Package '$pkg_name' not found in repository"
-            continue
         fi
-
-        # Download the .ikeg descriptor
-        local ikeg_url="$REPO_BASE/$pkg_name.ikeg"
-        local ikeg_file="/tmp/auro-repo-$pkg_name.ikeg"
-
-        print_info "Fetching $pkg_name.ikeg..."
-        if ! wget -q "$ikeg_url" -O "$ikeg_file" 2>/dev/null; then
-            print_error "Failed to download $ikeg_url"
-            rm -f "$ikeg_file"
-            continue
-        fi
-
-        # Delegate to load command
-        cmd_load "$ikeg_file"
-
-        # Cleanup temp ikeg
-        rm -f "$ikeg_file"
     done
+
+    # When AURO_SKIP_PROMPT is set, each invoked cmd_load will skip the interactive prompt
+    rm -rf "$tmp_dir"
 }
 
 # Get command (download and install)
@@ -447,8 +608,17 @@ cmd_get() {
     done
 }
 
+# Ensure .keg directories and config are owned by the real user
+fix_ownership() {
+    if [[ -n "$SUDO_USER" ]]; then
+        chown -R "$SUDO_USER:$SUDO_USER" "$REAL_HOME/.keg" 2>/dev/null || true
+    fi
+}
+
 # Main command parser
 main() {
+    fix_ownership
+
     if [[ $# -eq 0 ]]; then
         cmd_help
         exit 0
@@ -470,11 +640,20 @@ main() {
         load)
             cmd_load "$@"
             ;;
+        add-repo)
+            cmd_add_repo "$@"
+            ;;
+        remove-repo)
+            cmd_remove_repo "$@"
+            ;;
         repo)
             cmd_repo "$@"
             ;;
         list)
             cmd_list
+            ;;
+        fixperms)
+            cmd_fixperms "$@"
             ;;
         help|--help|-h)
             cmd_help
