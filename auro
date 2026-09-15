@@ -411,7 +411,7 @@ except Exception as e:
 }
 
 # Repo base URL (no trailing slash)
-REPO_BASE="http://aurorepo.runbsd.io/pkgs"
+REPO_BASE="https://aurorepo.runbsd.io/pkgs"
 
 # Load configured repositories. The built-in default is always first.
 load_repos() {
