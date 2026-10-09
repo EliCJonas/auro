@@ -3,12 +3,7 @@
 VERSION="1.6.0"
 PROGRAM_NAME="auro"
 
-# Check for root/sudo access
-if [[ $EUID -ne 0 ]]; then
-    exec sudo "$0" "$@"
-fi
-
-# Get the real user's home directory (not root's)
+# Get the real user's home directory
 if [[ -n "$SUDO_USER" ]]; then
     REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 else
@@ -106,6 +101,20 @@ cmd_install() {
         return 1
     fi
 
+    # Check if any package requires root (has a lib/ directory for system libraries)
+    local needs_root=0
+    for kegfile in "$@"; do
+        if [[ -f "$kegfile" ]] && unzip -l "$kegfile" 2>/dev/null | grep -q 'lib/'; then
+            needs_root=1
+            break
+        fi
+    done
+
+    # Re-exec with sudo if libraries are needed
+    if [[ $needs_root -eq 1 && $EUID -ne 0 ]]; then
+        exec sudo "$0" "${ORIGINAL_ARGS[@]}"
+    fi
+
     for kegfile in "$@"; do
         # Check if file exists
         if [[ ! -f "$kegfile" ]]; then
@@ -153,6 +162,13 @@ cmd_install() {
                 *.aro) pkg_name="${bname%.aro}" ;;
                 *) pkg_name="$bname" ;;
             esac
+        fi
+
+        # Validate package name to prevent path traversal
+        if [[ ! "$pkg_name" =~ ^[a-z0-9._-]+$ ]]; then
+            print_error "Invalid package name: '$pkg_name' (must contain only lowercase letters, digits, dot, underscore, hyphen)"
+            rm -rf "$temp_dir"
+            continue
         fi
 
         # Prepare to track installed files
@@ -366,9 +382,17 @@ except Exception as e:
             continue
         fi
 
-        # Warn if no checksum is provided (and the user did not opt out)
-        if [[ -z "${pkg_checksum:-}" && -z "${INSECURE_CHECKSUM:-}" ]]; then
-            echo -e "  ${YELLOW}Warning: Could not verify package's checksum${NC}"
+        # Check for checksum and enforce --insecure for unsigned packages
+        local has_checksum=0
+        if command -v jq >/dev/null 2>&1; then
+            has_checksum=$(jq -e '.checksum // empty' "$ikegfile" >/dev/null 2>&1 && echo 1 || echo 0)
+        else
+            has_checksum=$(grep -q '"checksum"' "$ikegfile" 2>/dev/null && echo 1 || echo 0)
+        fi
+        if [[ "$has_checksum" -eq 0 && -z "${INSECURE_CHECKSUM:-}" ]]; then
+            echo "DEBUG: has_checksum=$has_checksum, pkg_checksum='${pkg_checksum}', INSECURE_CHECKSUM='${INSECURE_CHECKSUM:-}'" >&2
+            print_error "Package '$pkg_name' has no checksum. Use --insecure to install unsigned packages."
+            continue
         fi
 
         # Install dependencies if specified
@@ -759,6 +783,9 @@ fix_ownership() {
 # Main command parser
 main() {
     fix_ownership
+
+    # Store original arguments for potential sudo re-exec
+    ORIGINAL_ARGS=("$@")
 
     if [[ $# -eq 0 ]]; then
         cmd_help
