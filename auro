@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="1.6.0"
+VERSION="1.6.1"
 PROGRAM_NAME="auro"
 
 # Get the real user's home directory
@@ -174,6 +174,13 @@ cmd_install() {
         # Prepare to track installed files
         local bin_name=$(echo "$pkg_name" | tr '[:upper:]' '[:lower:]')
 
+        # Don't track the auro package manager itself in the installed list
+        local track_manifest=1
+        if [[ "$pkg_name" == "auro" ]]; then
+            print_info "Not tracking $pkg_name in the installed list (it's the package manager)"
+            track_manifest=0
+        fi
+
         # Ensure directories exist (remove file if it conflicts)
         for dir in "$INSTALLED" "$DATA" "$BIN"; do
             if [[ -f "$dir" ]]; then
@@ -182,8 +189,11 @@ cmd_install() {
             mkdir -p "$dir"
         done
 
-        local manifest="$INSTALLED/$bin_name.txt"
-        > "$manifest"  # Clear/create manifest
+        local manifest=""
+        if [[ $track_manifest -eq 1 ]]; then
+            manifest="$INSTALLED/$bin_name.txt"
+            > "$manifest"  # Clear/create manifest
+        fi
 
         # Move data files to $DATA
         if [[ -d "$pkg_root/data" ]]; then
@@ -191,7 +201,9 @@ cmd_install() {
                 if [[ -e "$file" ]]; then
                     local basename=$(basename "$file")
                     cp -r "$file" "$DATA/"
-                    echo "$DATA/$basename" >> "$manifest"
+                    if [[ $track_manifest -eq 1 ]]; then
+                        echo "$DATA/$basename" >> "$manifest"
+                    fi
                 fi
             done
         fi
@@ -202,7 +214,9 @@ cmd_install() {
                 if [[ -e "$file" ]]; then
                     local basename=$(basename "$file")
                     cp -r "$file" "$LIB/"
-                    echo "$LIB/$basename" >> "$manifest"
+                    if [[ $track_manifest -eq 1 ]]; then
+                        echo "$LIB/$basename" >> "$manifest"
+                    fi
                 fi
             done
         fi
@@ -215,13 +229,19 @@ cmd_install() {
             [[ "$basename" == "keg-name.txt" ]] && continue
             cp "$file" "$BIN/$basename"
             chmod +x "$BIN/$basename"
-            echo "$BIN/$basename" >> "$manifest"
+            if [[ $track_manifest -eq 1 ]]; then
+                echo "$BIN/$basename" >> "$manifest"
+            fi
             # Symlink to ~/.local/bin for PATH accessibility
             mkdir -p "$REAL_HOME/.local/bin"
             ln -sf "$BIN/$basename" "$REAL_HOME/.local/bin/$basename"
-            echo "$REAL_HOME/.local/bin/$basename" >> "$manifest"
+            if [[ $track_manifest -eq 1 ]]; then
+                echo "$REAL_HOME/.local/bin/$basename" >> "$manifest"
+            fi
             ln -sf "$BIN/$basename" "/usr/local/bin/$basename"
-            echo "/usr/local/bin/$basename" >> "$manifest"
+            if [[ $track_manifest -eq 1 ]]; then
+                echo "/usr/local/bin/$basename" >> "$manifest"
+            fi
         done
 
         # Move .desktop files to applications directory
@@ -231,7 +251,9 @@ cmd_install() {
                 if [[ -e "$file" ]]; then
                     local basename=$(basename "$file")
                     cp "$file" "$DESKTOP/"
-                    echo "$DESKTOP/$basename" >> "$manifest"
+                    if [[ $track_manifest -eq 1 ]]; then
+                        echo "$DESKTOP/$basename" >> "$manifest"
+                    fi
                 fi
             done
         fi
@@ -244,8 +266,10 @@ cmd_install() {
                     local basename=$(basename "$file")
                     cp "$file" "$DATA/"
                     ln -sf "$DATA/$basename" "$ICONS/$basename"
-                    echo "$DATA/$basename" >> "$manifest"
-                    echo "$ICONS/$basename" >> "$manifest"
+                    if [[ $track_manifest -eq 1 ]]; then
+                        echo "$DATA/$basename" >> "$manifest"
+                        echo "$ICONS/$basename" >> "$manifest"
+                    fi
                 fi
             done
             gtk-update-icon-cache "$REAL_HOME/.local/share/icons/hicolor" 2>/dev/null
@@ -264,6 +288,30 @@ cmd_remove() {
         print_error "No package specified"
         echo "Usage: $PROGRAM_NAME remove <package...>"
         return 1
+    fi
+
+    # Check if any package has root-owned files (libraries in /usr/local/lib, binaries in /usr/local/bin)
+    local needs_root=0
+    for pkg_name in "$@"; do
+        local bin_name=$(echo "$pkg_name" | tr '[:upper:]' '[:lower:]')
+        local manifest="$INSTALLED/$bin_name.txt"
+        if [[ -f "$manifest" ]]; then
+            while IFS= read -r file; do
+                if [[ "$file" == /usr/local/lib/* || "$file" == /usr/local/bin/* || "$file" == /usr/local/* ]]; then
+                    needs_root=1
+                    break
+                fi
+            done < "$manifest"
+            [[ $needs_root -eq 1 ]] && break
+        fi
+    done
+
+    # Re-exec with sudo if needed
+    if [[ $needs_root -eq 1 && $EUID -ne 0 ]]; then
+        local sudo_args=()
+        [[ -n "${INSECURE_CHECKSUM:-}" ]] && sudo_args+=(--insecure)
+        sudo_args+=(remove "$@")
+        exec sudo "$0" "${sudo_args[@]}"
     fi
 
     for pkg_name in "$@"; do
@@ -713,13 +761,18 @@ cmd_update() {
 
     # Read the first non-empty line as the keg URL
     local keg_url=""
+    local remote_version=""
     while IFS= read -r line; do
         # Strip comments (lines starting with #) and leading/trailing whitespace
         line="${line%%#*}"
         line="$(echo "$line" | xargs)"
         if [[ -n "$line" ]]; then
-            keg_url="$line"
-            break
+            if [[ -z "$keg_url" ]]; then
+                keg_url="$line"
+            else
+                # Second non-empty line is the version number
+                remote_version="$line"
+            fi
         fi
     done < "$update_file"
 
@@ -728,6 +781,15 @@ cmd_update() {
     if [[ -z "$keg_url" ]]; then
         print_error "No update URL found in auro.update"
         return 1
+    fi
+
+    # Check for version information in the second line
+    if [[ -n "$remote_version" ]]; then
+        if [[ "$remote_version" == "$VERSION" ]]; then
+            print_info "auro is already up to date (local version: $VERSION)"
+            return 0
+        fi
+        print_info "Available version: $remote_version (current: $VERSION)"
     fi
 
     print_info "Found update: $keg_url"
