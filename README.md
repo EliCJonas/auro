@@ -13,7 +13,7 @@
 ---
 
 # .keg format
-The .keg format contains the following:
+The `.keg` format (also used by the `.aro` alias) contains the following:
  - Shared Libraries
  - .desktop files
  - Icons
@@ -74,3 +74,63 @@ When running `auro repo <package...>`, auro searches repositories in this order:
 2. User-added repositories in the order they appear in the config file
 
 The first repository containing the requested package supplies it (first-match-wins).
+
+---
+
+## Checksum Verification
+
+`.ikeg` and `.iaro` descriptor files can optionally include a `checksum` field:
+
+```json
+{
+  "name": "myapp",
+  "version": "1.0",
+  "author": "you",
+  "description": "My app",
+  "download-url": "https://example.com/app.keg",
+  "checksum": "a1b2c3d4e5..."
+}
+```
+
+- If provided, Auro verifies the SHA256 checksum of the downloaded package
+- If the checksum is missing, a warning is displayed
+- If the checksum does not match, installation fails with an error
+- Use `--insecure` or `-I` to disable checksum verification globally
+
+---
+
+## Dependencies
+
+`.ikeg` and `.iaro` files can optionally include a `deps` field:
+
+```json
+{
+  "name": "myapp",
+  "download-url": "https://example.com/app.keg",
+  "deps": ["dep1", "dep2", "another-pkg"]
+}
+```
+
+When `deps` is present, Auro will install each listed dependency by searching all configured repositories before installing the main package. Dependencies are installed automatically without prompting.
+
+---
+
+## Updating Auro
+
+Since Auro itself is distributed as a `.keg` package, it can update itself from the default repository:
+
+```bash
+auro update
+```
+
+This command:
+1. Fetches the `auro.update` file from the default repository
+2. Extracts the URL to the latest `auro.keg` package
+3. Downloads and installs the update, which replaces the binaries in `~/.keg/bin/` and `/usr/local/bin/`
+
+**Note:** If you have configured additional repositories, you can manually download and install updates from any repo:
+```bash
+auro repo auro
+# or
+auro get https://example.com/auro.keg
+```

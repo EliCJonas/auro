@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(command -v expect)",
+      "Bash(timeout 3 sudo bash -c ' *)",
+      "Bash(bash -n /home/eli/VSCode/auro/auro)"
+    ]
+  }
+}

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="1.5.0"
+VERSION="1.6.0"
 PROGRAM_NAME="auro"
 
 # Check for root/sudo access
@@ -70,31 +70,39 @@ EOF
     echo -e "              ${GREEN}auro v${VERSION}${NC}"
     echo -e "        ${BLUE}A simple package manager${NC}"
     echo ""
-    echo -e "${YELLOW}Usage:${NC} $PROGRAM_NAME <command> [options] [packages...]"
+    echo -e "${YELLOW}Usage:${NC} $PROGRAM_NAME [--insecure|-I] <command> [options] [packages...]"
     echo ""
     echo -e "${YELLOW}Commands:${NC}"
-    echo -e "  ${GREEN}install${NC} <file.keg...>  Install one or more .keg packages"
+    echo -e "  ${GREEN}install${NC} <file.keg|.aro...>  Install .keg or .aro packages"
     echo -e "  ${GREEN}remove${NC} <package...>    Remove installed packages"
     echo -e "  ${GREEN}get${NC} <url...>           Download and install from URL"
-    echo -e "  ${GREEN}load${NC} <file.ikeg...>    Install from an .ikeg descriptor"
+    echo -e "  ${GREEN}load${NC} <file.ikeg|.iaro...>    Install from an .ikeg or .iaro descriptor"
     echo -e "  ${GREEN}repo${NC} <package...>      Install from the remote repository"
     echo -e "  ${GREEN}add-repo${NC} <name> <url>      Add a repository"
     echo -e "  ${GREEN}remove-repo${NC} <name>         Remove a repository"
     echo -e "  ${GREEN}fixperms${NC}                   Fix permissions on the .keg directory"
+    echo -e "  ${GREEN}update${NC}                     Update auro from the default repository"
     echo -e "  ${GREEN}list${NC}                       List installed packages"
     echo -e "  ${GREEN}help${NC}                   Show this help message"
     echo ""
     echo -e "${YELLOW}Examples:${NC}"
     echo -e "  $PROGRAM_NAME install myapp.keg"
+    echo -e "  $PROGRAM_NAME install myapp.aro"
+    echo -e "  $PROGRAM_NAME load myapp.ikeg"
+    echo -e "  $PROGRAM_NAME load myapp.iaro"
     echo -e "  $PROGRAM_NAME get https://example.com/app.keg"
+    echo -e "  $PROGRAM_NAME get https://example.com/app.aro"
+    echo ""
+    echo -e "${YELLOW}Global options:${NC}"
+    echo -e "  ${GREEN}--insecure, -I${NC}  Disable checksum verification"
     echo ""
 }
 
 # Install command
 cmd_install() {
     if [[ $# -eq 0 ]]; then
-        print_error "No .keg file specified"
-        echo "Usage: $PROGRAM_NAME install <file.keg...>"
+        print_error "No package file specified"
+        echo "Usage: $PROGRAM_NAME install <file.keg|.aro...>"
         return 1
     fi
 
@@ -105,9 +113,9 @@ cmd_install() {
             continue
         fi
 
-        # Check if it's a .keg file
-        if [[ "$kegfile" != *.keg ]]; then
-            print_warning "File does not have .keg extension: $kegfile"
+        # Check if it's a supported package file
+        if [[ ! "$kegfile" =~ \.(keg|aro)$ ]]; then
+            print_warning "File does not have .keg or .aro extension: $kegfile"
         fi
 
         print_info "Installing $kegfile..."
@@ -139,7 +147,12 @@ cmd_install() {
         if [[ -f "$pkg_root/keg-name.txt" ]]; then
             pkg_name=$(cat "$pkg_root/keg-name.txt")
         else
-            pkg_name=$(basename "$kegfile" .keg)
+            local bname=$(basename "$kegfile")
+            case "$bname" in
+                *.keg) pkg_name="${bname%.keg}" ;;
+                *.aro) pkg_name="${bname%.aro}" ;;
+                *) pkg_name="$bname" ;;
+            esac
         fi
 
         # Prepare to track installed files
@@ -292,7 +305,7 @@ cmd_list() {
 cmd_load() {
     if [[ $# -eq 0 ]]; then
         print_error "No .ikeg file specified"
-        echo "Usage: $PROGRAM_NAME load <file.ikeg...>"
+        echo "Usage: $PROGRAM_NAME load <file.ikeg|.iaro...>"
         return 1
     fi
 
@@ -303,23 +316,29 @@ cmd_load() {
             continue
         fi
 
-        # Check if it's an .ikeg file
-        if [[ "$ikegfile" != *.ikeg ]]; then
-            print_warning "File does not have .ikeg extension: $ikegfile"
+        # Check if it's an .ikeg or .iaro file
+        if [[ ! "$ikegfile" =~ \.(ikeg|iaro)$ ]]; then
+            print_warning "File does not have .ikeg or .iaro extension: $ikegfile"
         fi
 
         print_info "Reading $ikegfile..."
 
         # Parse JSON and extract fields using a single python3 call
-        # Outputs tab-separated: name\tversion\tauthor\tdescription\tdownload_url
+        # Outputs tab-separated: name\tversion\tauthor\tdescription\tdownload-url\tchecksum\tdeps
         local parsed parse_err
         parsed=$(python3 -c "
 import json, sys
 try:
     with open(sys.argv[1]) as f:
         d = json.load(f)
-    fields = ['name', 'version', 'author', 'description', 'download-url']
-    print('\t'.join(str(d.get(f, '')) for f in fields))
+    fields = ['name', 'version', 'author', 'description', 'download-url', 'checksum', 'deps']
+    deps_val = d.get('deps', [])
+    if isinstance(deps_val, list):
+        deps_str = json.dumps(deps_val)
+    else:
+        deps_str = ''
+    fields = [str(d.get(f, '')) if f != 'deps' else deps_str for f in fields]
+    print('\t'.join(fields))
 except Exception as e:
     print('ERROR:' + str(e), file=sys.stderr)
     sys.exit(1)
@@ -334,7 +353,8 @@ except Exception as e:
         fi
 
         # Read tab-separated fields into variables
-        IFS=$'\t' read -r pkg_name pkg_version pkg_author pkg_description pkg_url <<< "$parsed"
+        IFS=$'\t' read -r pkg_name pkg_version pkg_author pkg_description pkg_url pkg_checksum remainder <<< "$parsed"
+        pkg_deps_raw="$remainder"
 
         if [[ -z "$pkg_name" ]]; then
             print_error "Missing 'name' field in $ikegfile"
@@ -344,6 +364,33 @@ except Exception as e:
         if [[ -z "$pkg_url" ]]; then
             print_error "Missing 'download-url' field in $ikegfile"
             continue
+        fi
+
+        # Warn if no checksum is provided (and the user did not opt out)
+        if [[ -z "${pkg_checksum:-}" && -z "${INSECURE_CHECKSUM:-}" ]]; then
+            echo -e "  ${YELLOW}Warning: Could not verify package's checksum${NC}"
+        fi
+
+        # Install dependencies if specified
+        local dep_failed=0
+        if [[ -n "$pkg_deps_raw" && "$pkg_deps_raw" != "[]" ]]; then
+            local dep_count
+            dep_count=$(python3 -c "import json; print(len(json.loads('$pkg_deps_raw')))" 2>/dev/null || echo 0)
+            if [[ "$dep_count" -gt 0 ]]; then
+                print_info "Installing $dep_count dependency(ies)..."
+                while IFS= read -r dep_name; do
+                    if [[ -n "$dep_name" ]]; then
+                        if ! AURO_SKIP_PROMPT=1 cmd_repo "$dep_name"; then
+                            print_error "Failed to install dependency '$dep_name'"
+                            dep_failed=1
+                            break
+                        fi
+                    fi
+                done < <(python3 -c "import json, sys; [print(d) for d in json.loads('$pkg_deps_raw')]" 2>/dev/null)
+                if [[ $dep_failed -eq 1 ]]; then
+                    continue
+                fi
+            fi
         fi
 
         # Display package info
@@ -401,6 +448,27 @@ except Exception as e:
         fi
 
         print_success "Successfully downloaded $filename"
+
+        # Verify checksum if provided
+        if [[ -n "${pkg_checksum:-}" && -z "${INSECURE_CHECKSUM:-}" ]]; then
+            local computed_checksum
+            if command -v sha256sum >/dev/null 2>&1; then
+                computed_checksum=$(sha256sum "$keg_path" | awk '{print $1}')
+            elif command -v shasum >/dev/null 2>&1; then
+                computed_checksum=$(shasum -a 256 "$keg_path" | awk '{print $1}')
+            else
+                print_warning "Could not verify checksum: sha256sum not found"
+                computed_checksum=""
+            fi
+            if [[ -n "$computed_checksum" ]]; then
+                if [[ "$computed_checksum" != "$pkg_checksum" ]]; then
+                    print_error "Checksum mismatch for $pkg_name: expected $pkg_checksum, got $computed_checksum"
+                    rm -f "$keg_path"
+                    continue
+                fi
+                print_info "Checksum verified: $computed_checksum"
+            fi
+        fi
 
         # Install the downloaded .keg
         cmd_install "$keg_path"
@@ -552,6 +620,7 @@ cmd_repo() {
         fi
     done < "$repos_file"
 
+    local missing=0
     for pkg_name in "$@"; do
         local found=0
         while IFS=$'\t' read -r repo_name repo_url; do
@@ -561,15 +630,27 @@ cmd_repo() {
             if grep -qxF "$pkg_name" "$index_file"; then
                 local ikeg_url="$repo_url/$pkg_name.ikeg"
                 local ikeg_file="/tmp/auro-repo-$pkg_name.ikeg"
-                print_info "Found '$pkg_name' in repository '$repo_name'"
-                print_info "Fetching $pkg_name.ikeg..."
-                if ! wget -q "$ikeg_url" -O "$ikeg_file" 2>/dev/null; then
-                    print_error "Failed to download $ikeg_url"
-                    rm -f "$ikeg_file"
+                local iaro_file="/tmp/auro-repo-$pkg_name.iaro"
+                local desc_url
+                local desc_file
+
+                # Try the ikeg descriptor, then fall back to iaro
+                if wget -q "$ikeg_url" -O "$ikeg_file" 2>/dev/null; then
+                    desc_url="$pkg_name.ikeg"
+                    desc_file="$ikeg_file"
+                elif wget -q "$repo_url/$pkg_name.iaro" -O "$iaro_file" 2>/dev/null; then
+                    desc_url="$pkg_name.iaro"
+                    desc_file="$iaro_file"
+                else
+                    print_error "Failed to download package descriptor for '$pkg_name'"
+                    rm -f "$ikeg_file" "$iaro_file"
                     continue
                 fi
-                cmd_load "$ikeg_file"
-                rm -f "$ikeg_file"
+
+                print_info "Found '$pkg_name' in repository '$repo_name'"
+                print_info "Fetching $desc_url..."
+                cmd_load "$desc_file"
+                rm -f "$desc_file"
                 found=1
                 break
             fi
@@ -577,11 +658,71 @@ cmd_repo() {
 
         if [[ $found -eq 0 ]]; then
             print_error "Package '$pkg_name' not found in repository"
+            missing=1
         fi
     done
 
     # When AURO_SKIP_PROMPT is set, each invoked cmd_load will skip the interactive prompt
     rm -rf "$tmp_dir"
+    return $missing
+}
+
+# Update command (install update from default repo)
+cmd_update() {
+    if [[ $# -ne 0 ]]; then
+        print_error "Invalid arguments"
+        echo "Usage: $PROGRAM_NAME update"
+        return 1
+    fi
+
+    print_info "Checking for auro updates..."
+
+    # Download the auro.update file from the default repository
+    local update_file="/tmp/.auro_update"
+    local update_url="$REPO_BASE/auro.update"
+
+    if ! wget -q "$update_url" -O "$update_file" 2>/dev/null; then
+        print_error "Failed to fetch update information from $update_url"
+        rm -f "$update_file"
+        return 1
+    fi
+
+    # Read the first non-empty line as the keg URL
+    local keg_url=""
+    while IFS= read -r line; do
+        # Strip comments (lines starting with #) and leading/trailing whitespace
+        line="${line%%#*}"
+        line="$(echo "$line" | xargs)"
+        if [[ -n "$line" ]]; then
+            keg_url="$line"
+            break
+        fi
+    done < "$update_file"
+
+    rm -f "$update_file"
+
+    if [[ -z "$keg_url" ]]; then
+        print_error "No update URL found in auro.update"
+        return 1
+    fi
+
+    print_info "Found update: $keg_url"
+
+    # Download the update package
+    local keg_path="/tmp/auro-update.keg"
+    if ! wget -q "$keg_url" -O "$keg_path" 2>/dev/null; then
+        print_error "Failed to download update package from $keg_url"
+        rm -f "$keg_path"
+        return 1
+    fi
+
+    print_success "Downloaded update package"
+
+    # Install the update (skip interactive prompts since this is automated)
+    AURO_SKIP_PROMPT=1 cmd_install "$keg_path"
+
+    rm -f "$keg_path"
+    print_success "auro has been updated"
 }
 
 # Get command (download and install)
@@ -624,6 +765,21 @@ main() {
         exit 0
     fi
 
+    # Parse global flags before the command
+    while [[ $# -gt 0 && "$1" == -* ]]; do
+        case "$1" in
+            --insecure|-I)
+                INSECURE_CHECKSUM=1
+                shift
+                ;;
+            *)
+                print_error "Unknown flag: $1"
+                echo "Run '$PROGRAM_NAME help' for usage information"
+                exit 1
+                ;;
+        esac
+    done
+
     local command="$1"
     shift
 
@@ -648,6 +804,9 @@ main() {
             ;;
         repo)
             cmd_repo "$@"
+            ;;
+        update)
+            cmd_update "$@"
             ;;
         list)
             cmd_list
